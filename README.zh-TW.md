@@ -29,30 +29,30 @@ Claude： → search_parts("LDO 3.3V 500mA SOT-23-5", in_stock=true, sort="price
 
 ## 特色
 
-- **真的讀 datasheet，不只給連結。** 自動找出腳位（pinout）、絕對最大額定、建議操作條件、電氣特性、熱特性、封裝、訂購資訊等章節（優先用 PDF 書籤，沒有書籤就找標題），只把那幾頁交給模型，另附自動解析的腳位表。任何 PDF 網址都能用，不限 DigiKey。
-- **能直接拿來採購的答案。** `get_price` 會依數量挑最便宜的包裝（剪帶或整捲，略過要加收捲帶費的 Digi-Reel），並顯示下一個價格級距。`price_bom` 可以算 N 片板子的整份 BOM 成本，標出找不到、缺貨與停產的料。
+- **真的讀 datasheet，不只給連結。** 自動找出腳位（pinout）、絕對最大額定、建議操作條件、電氣特性、熱特性、封裝、訂購資訊等章節（優先用 PDF 書籤，沒有書籤就找標題），只把那幾頁交給模型，另附自動解析的腳位表。任何 PDF 網址或電腦裡的 PDF 檔都能用，不限 DigiKey。
+- **能直接拿來採購的答案。** `get_price` 會依數量找出最便宜的買法，包含「整捲 + 剪帶補零頭」（3,500 顆 = 一捲 3,000 + 剪帶 500），並顯示下一個價格級距。`price_bom` 可直接貼 KiCad／Altium／Excel 的 CSV BOM，自動合併重複料號、加損耗備品、算 N 片板子的成本，標出找不到、缺貨與停產的料，還能建議有現貨的替代料。
 - **比較與替代料。** 並排比較參數表，停產料直接查 DigiKey 官方的替代建議。
 - **沒有金鑰也能用。** `search_lcsc`（LCSC／JLCPCB 組裝料）和用網址讀 datasheet 都不需要帳號，之後再加 DigiKey 金鑰即可解鎖其他功能。
-- **金鑰只在你手上。** 在本機以 stdio 執行，憑證只會送到 `api.digikey.com`。所有工具都是唯讀，不會加入購物車或下單。
-- **有完整測試。** 58 個測試，以模擬的 DigiKey API 和自動產生的 PDF 執行，涵蓋 Linux、macOS、Windows 與 Python 3.10 到 3.13。
+- **金鑰只在你手上。** 在本機以 stdio 執行，憑證只會送到 `api.digikey.com`。所有工具都是唯讀，不會加入購物車或下單。下載 datasheet 時會拒絕 localhost 與內網位址，避免文件裡被埋的網址拿來探測你的網路。
+- **有完整測試。** 97 個測試，以模擬的 DigiKey API 和自動產生的 PDF 執行，涵蓋 Linux、macOS、Windows 與 Python 3.10 到 3.13。
 
 ## 工具一覽
 
 | 工具 | 功能 | 需要 DigiKey 金鑰 |
 | --- | --- | :---: |
-| `search_parts` | 關鍵字或料號搜尋，可篩選有庫存、RoHS、排序、製造商 | ✓ |
+| `search_parts` | 關鍵字或料號搜尋；可篩選有庫存、最低庫存、價格上限、RoHS、只要量產中、製造商；可依價格或庫存排序 | ✓ |
 | `get_part` | 完整參數、各種包裝與價格級距、生命週期、RoHS、交期 | ✓ |
-| `get_price` | 指定數量的最佳價格（跨包裝比較）與下一個價格級距 | ✓ |
+| `get_price` | 指定數量的最佳價格（跨包裝比較，含整捲 + 剪帶）與下一個價格級距 | ✓ |
 | `find_alternatives` | DigiKey 替代料（直接替代、相似、升級），含庫存與價格 | ✓ |
 | `compare_parts` | 2 到 6 顆零件的 Markdown 比較表，標出差異參數 | ✓ |
-| `price_bom` | 計算最多 100 行 BOM、N 片板子的成本並給出警告 | ✓ |
+| `price_bom` | 計算 BOM（逐行輸入或貼 CSV，最多 100 種料）N 片板子含備品的成本、警告與替代料建議 | ✓ |
 | `search_lcsc` | LCSC／JLCPCB 零件：C 編號、庫存、價格、基礎庫／優選庫 | |
 | `datasheet_outline` | 頁數、書籤、各重要章節的起始頁 | 用料號時需要 |
 | `datasheet_section` | 取出單一章節文字（pinout、absolute_maximum_ratings、electrical_characteristics…） | 用料號時需要 |
 | `datasheet_search` | 在 datasheet 中搜尋詞彙（如「I2C address」）並回傳頁碼 | 用料號時需要 |
 | `datasheet_pages` | 取出指定頁範圍的原始文字 | 用料號時需要 |
 
-datasheet 工具可以輸入料號（透過 DigiKey 查出 datasheet）或直接輸入 PDF 網址（不需金鑰）。
+datasheet 工具可以輸入料號（透過 DigiKey 查出 datasheet）、PDF 網址，或本機 PDF 路徑例如 `C:\datasheets\lm358.pdf`（後兩者不需金鑰）。
 
 ## 安裝
 
@@ -127,6 +127,7 @@ claude mcp add digikey \
 | `DIGIKEY_SANDBOX` | `false` | 使用 Sandbox app 時設為 `true` |
 | `DIGIKEY_MCP_CACHE_DIR` | `~/.cache/digikey-datasheet-mcp` | datasheet 文字快取位置 |
 | `DATASHEET_MAX_MB` | `50` | 可下載的 PDF 大小上限 |
+| `DATASHEET_ALLOW_PRIVATE` | `false` | 設為 `true` 才允許從 localhost 或公司內網下載 datasheet |
 | `LCSC_SEARCH_URL` | `https://jlcsearch.tscircuit.com` | LCSC 索引來源，可改成自架的 [jlcsearch](https://github.com/tscircuit/jlcsearch) |
 
 ## datasheet 解析原理
@@ -139,7 +140,8 @@ claude mcp add digikey \
 
 ## 提示詞範例
 
-- 「幫我算這份 BOM 做 50 片的成本，並告訴我哪些缺貨：」後面貼上 BOM
+- 「這份 BOM 做 50 片、加 5% 備品要多少錢？缺貨的幫我找替代料：」後面貼上 CSV BOM
+- 「讀 ~/Downloads/ADS1115.pdf，告訴我 I2C 位址有哪些選項。」
 - 「比較 TPS7A2033PDBVR、AP2112K-3.3TRG1、MCP1700T-3302E/TT，用在電池供電的感測器上哪個好？」
 - 「我設計裡的 LM1117 停產了，有哪些有現貨的 pin-to-pin 替代料？」
 - 「根據 STM32F103C8 的 datasheet，列出所有 5 V tolerant 的腳位。」

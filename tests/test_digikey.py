@@ -94,3 +94,15 @@ async def test_sandbox_host(tmp_path, backend):
     client = DigiKeyClient(settings(tmp_path, sandbox=True), http=http_for(backend))
     await client.product_details("TPS7A9933DBVR")
     assert {r.url.host for r in backend.requests} == {"sandbox-api.digikey.com"}
+
+
+async def test_non_json_success_is_a_clean_error(digikey, backend):
+    backend.overrides["/products/"] = lambda r: httpx.Response(200, text="<html>maintenance</html>")
+    with pytest.raises(DigiKeyError, match="not JSON"):
+        await digikey.product_details("TPS7A9933DBVR")
+
+
+async def test_malformed_token_response(digikey, backend):
+    backend.overrides["/v1/oauth2/token"] = lambda r: httpx.Response(200, json={"oops": 1})
+    with pytest.raises(DigiKeyError, match="unexpected token"):
+        await digikey.product_details("TPS7A9933DBVR")

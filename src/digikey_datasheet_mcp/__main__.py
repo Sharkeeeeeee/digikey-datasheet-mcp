@@ -7,7 +7,7 @@ import asyncio
 import sys
 
 from . import __version__
-from .config import Settings
+from .config import ConfigError, Settings
 
 
 async def _check(settings: Settings) -> int:
@@ -41,7 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="verify DigiKey credentials and exit")
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio", help="default: stdio")
     args = parser.parse_args(argv)
-    settings = Settings.from_env()
+    try:
+        settings = Settings.from_env()
+    except ConfigError as exc:
+        print(f"digikey-datasheet-mcp: configuration error: {exc}", file=sys.stderr)
+        return 2
     if args.check:
         return asyncio.run(_check(settings))
 

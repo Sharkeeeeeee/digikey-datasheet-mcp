@@ -57,3 +57,23 @@ def test_best_offer_prefers_in_stock():
 def test_best_offer_out_of_stock_is_flagged():
     offer = normalize.best_offer(obsolete_product(), 5)
     assert offer["best"]["in_stock"] is False
+
+
+def test_reels_are_sold_in_whole_reels_topped_up_with_cut_tape():
+    product = ldo_product()
+    product["ProductVariations"][0]["QuantityAvailableforPackageType"] = 5000
+    offer = normalize.best_offer(product, 3500)
+    best = offer["best"]
+    # 1 reel at 0.42 + 500 cut tape at 0.71 beats 3500 on cut tape at 0.71.
+    assert best["packaging"] == "1 x Tape & Reel (TR) + 500 on Cut Tape (CT)"
+    assert best["extended_price"] == round(3000 * 0.42 + 500 * 0.71, 4)
+    assert [line["quantity"] for line in best["lines"]] == [3000, 500]
+    assert best["in_stock"] is True
+    # A plain 3500-piece reel order is not offered: reels come in 3000s.
+    assert all(o["packaging"] != "Tape & Reel (TR)" for o in offer["other_options"])
+
+
+def test_two_full_reels():
+    offer = normalize.best_offer(ldo_product(), 6000)
+    assert offer["best"]["packaging"] == "Tape & Reel (TR)"
+    assert offer["best"]["extended_price"] == 6000 * 0.42

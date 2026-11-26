@@ -157,3 +157,68 @@ async def test_datasheet_page_out_of_range(server, backend):
 async def test_invalid_section_name_is_rejected(server):
     out = await call(server, "datasheet_section", {"source": DATASHEET_URL, "section": "everything"})
     assert "error" in out
+
+
+async def test_search_parts_local_filters_fetch_a_full_page(server, backend):
+    out = await call(server, "search_parts", {"query": "ldo", "limit": 5, "min_stock": 100, "active_only": True})
+    body = json.loads(backend.requests[-1].content)
+    assert body["Limit"] == 50
+    assert body["FilterOptionsRequest"] == {"SearchOptions": ["InStock"]}
+    assert [p["mpn"] for p in out["parts"]] == ["TPS7A9933DBVR"]
+    assert out["filtered_out"] == 1
+
+
+async def test_search_parts_price_filter_and_empty_hint(server):
+    out = await call(server, "search_parts", {"query": "ldo", "max_unit_price": 0.1})
+    assert out["parts"] == [] and "hint" in out
+
+
+async def test_search_parts_rejects_blank_query(server):
+    assert "empty" in (await call(server, "search_parts", {"query": "  "}))["error"]
+
+
+async def test_price_bom_from_csv_merges_duplicates_and_adds_spares(server):
+    csv_text = "Reference,MPN,Qty\nU1,TPS7A9933DBVR,1\nU7,tps7a9933dbvr,1\nC1,NOPE-1,1\n"
+    out = await call(server, "price_bom", {"bom_csv": csv_text, "build_quantity": 4, "spare_percent": 10})
+    ldo = out["lines"][0]
+    assert ldo["reference"] == "U1, U7"
+    assert ldo["quantity"] == 9  # 2 per board x 4 boards x 1.10, rounded up
+    assert ldo["unit_price"] == 1.12
+    assert out["lines_priced"] == 1 and out["lines_with_problems"] == 1
+
+
+async def test_price_bom_suggests_alternatives(server):
+    out = await call(
+        server,
+        "price_bom",
+        {"items": [{"part_number": "LM1117MP-3.3/NOPB", "quantity": 10}], "suggest_alternatives": True},
+    )
+    assert out["lines"][0]["alternative"]["mpn"] == "AZ1117CH-3.3TRG1"
+
+
+async def test_price_bom_needs_exactly_one_input(server):
+    assert "exactly one" in (await call(server, "price_bom", {}))["error"]
+    both = {"items": [{"part_number": "A", "quantity": 1}], "bom_csv": "MPN\nA\n"}
+    assert "exactly one" in (await call(server, "price_bom", both))["error"]
+    assert "part number column" in (await call(server, "price_bom", {"bom_csv": "Value\n10k\n"}))["error"]
+
+
+async def test_compare_parts_reports_unknown_parts(server):
+    out = await call(server, "compare_parts", {"part_numbers": ["TPS7A9933DBVR", "LM1117MP-3.3/NOPB", "NOPE"]})
+    assert list(out["not_found"]) == ["NOPE"]
+    assert "NOPE" not in out["table_markdown"]
+    only_one = await call(server, "compare_parts", {"part_numbers": ["TPS7A9933DBVR", "NOPE"]})
+    assert "at least two" in only_one["error"]
+
+
+async def test_datasheet_from_local_file(server, tmp_path):
+    path = tmp_path / "ldo.pdf"
+    path.write_bytes(make_pdf(LDO_PAGES))
+    out = await call(server, "datasheet_section", {"source": str(path), "section": "absolute_maximum_ratings"})
+    assert out["pages"] == [4]
+
+
+async def test_datasheet_pages_rejects_reversed_range(server, backend):
+    backend.add_file(DATASHEET_URL, make_pdf(LDO_PAGES))
+    out = await call(server, "datasheet_pages", {"source": DATASHEET_URL, "first_page": 4, "last_page": 2})
+    assert "before first_page" in out["error"]

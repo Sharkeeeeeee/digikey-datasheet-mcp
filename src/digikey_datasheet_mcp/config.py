@@ -15,6 +15,20 @@ def _default_cache_dir() -> Path:
     return Path(base) / "digikey-datasheet-mcp"
 
 
+class ConfigError(ValueError):
+    pass
+
+
+def _number(value: str, kind: type, name: str):
+    try:
+        number = kind(value)
+    except ValueError:
+        raise ConfigError(f"{name} must be a number, got {value!r}") from None
+    if number <= 0:
+        raise ConfigError(f"{name} must be greater than 0, got {value!r}")
+    return number
+
+
 @dataclass(frozen=True)
 class Settings:
     client_id: str | None = None
@@ -28,6 +42,7 @@ class Settings:
     timeout: float = 30.0
     lcsc_url: str = "https://jlcsearch.tscircuit.com"
     max_pdf_mb: int = 50
+    allow_private_urls: bool = False
 
     @property
     def has_digikey(self) -> bool:
@@ -51,7 +66,8 @@ class Settings:
             currency=get("DIGIKEY_LOCALE_CURRENCY", "USD"),
             customer_id=get("DIGIKEY_CUSTOMER_ID", "0"),
             cache_dir=Path(cache).expanduser() if cache else _default_cache_dir(),
-            timeout=float(get("DIGIKEY_MCP_TIMEOUT", "30")),
+            timeout=_number(get("DIGIKEY_MCP_TIMEOUT", "30"), float, "DIGIKEY_MCP_TIMEOUT"),
             lcsc_url=get("LCSC_SEARCH_URL", "https://jlcsearch.tscircuit.com").rstrip("/"),
-            max_pdf_mb=int(get("DATASHEET_MAX_MB", "50")),
+            max_pdf_mb=_number(get("DATASHEET_MAX_MB", "50"), int, "DATASHEET_MAX_MB"),
+            allow_private_urls=env.get("DATASHEET_ALLOW_PRIVATE", "").strip().lower() in _TRUE,
         )

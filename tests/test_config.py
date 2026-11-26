@@ -33,3 +33,18 @@ def test_reads_env():
 
 def test_blank_secret_means_not_configured():
     assert not Settings.from_env({"DIGIKEY_CLIENT_ID": "a", "DIGIKEY_CLIENT_SECRET": "  "}).has_digikey
+
+
+def test_bad_numbers_are_reported():
+    import pytest
+
+    from digikey_datasheet_mcp.config import ConfigError
+
+    with pytest.raises(ConfigError, match="DIGIKEY_MCP_TIMEOUT"):
+        Settings.from_env({"DIGIKEY_MCP_TIMEOUT": "fast"})
+    with pytest.raises(ConfigError, match="greater than 0"):
+        Settings.from_env({"DATASHEET_MAX_MB": "0"})
+
+
+def test_allow_private():
+    assert Settings.from_env({"DATASHEET_ALLOW_PRIVATE": "1"}).allow_private_urls

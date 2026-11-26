@@ -127,31 +127,71 @@ def unit_price_at(breaks: list[dict[str, float]], qty: int) -> float | None:
     return unit
 
 
-def best_offer(product: dict[str, Any], qty: int) -> dict[str, Any]:
-    """Cheapest packaging option for `qty` pieces, using standard price breaks.
+def _sold_in_multiples(v: dict[str, Any]) -> int:
+    """Full reels and trays are sold only in whole standard packages. Returns that size, or 1."""
+    spq = int(v.get("standard_package") or 0)
+    moq = int(v.get("min_order_qty") or 0)
+    return spq if spq > 1 and moq >= spq else 1
 
-    Packaging that needs more than `qty` pieces (a full reel, say) is skipped, and so is
-    packaging with no standard pricing (Digi-Reel, which adds a reeling fee).
+
+def _single_option(v: dict[str, Any], qty: int) -> dict[str, Any] | None:
+    breaks = v["price_breaks"]
+    if not breaks or qty <= 0:
+        return None
+    moq = int(v["min_order_qty"] or breaks[0]["qty"])
+    if qty < moq or qty % _sold_in_multiples(v):
+        return None
+    unit = unit_price_at(breaks, qty)
+    if unit is None:
+        return None
+    return {
+        "digikey_pn": v["digikey_pn"],
+        "packaging": v["packaging"],
+        "quantity": qty,
+        "unit_price": unit,
+        "extended_price": round(unit * qty, 4),
+        "stock": v["stock"],
+        "in_stock": v["stock"] is not None and v["stock"] >= qty,
+        "next_break": next((b for b in breaks if b["qty"] > qty), None),
+    }
+
+
+def best_offer(product: dict[str, Any], qty: int) -> dict[str, Any]:
+    """Cheapest way to buy `qty` pieces, using standard price breaks.
+
+    Considers each packaging on its own, plus full reels/trays topped up with cut tape
+    (e.g. 3,500 pcs = one 3,000-piece reel + 500 on cut tape). Packaging with no standard
+    pricing (Digi-Reel, which adds a reeling fee) is skipped.
     """
-    options = []
-    for v in variations(product):
-        breaks = v["price_breaks"]
-        moq = int(v["min_order_qty"] or (breaks[0]["qty"] if breaks else 1))
-        if not breaks or qty < moq:
+    packs = variations(product)
+    options = [o for v in packs if (o := _single_option(v, qty))]
+    flexible = [v for v in packs if _sold_in_multiples(v) == 1]
+    for reel in packs:
+        size = _sold_in_multiples(reel)
+        full = (qty // size) * size
+        rest = qty - full
+        if size == 1 or full == 0 or rest == 0:
             continue
-        unit = unit_price_at(breaks, qty)
-        if unit is None:
+        reel_part = _single_option(reel, full)
+        tops = [o for v in flexible if (o := _single_option(v, rest))]
+        if not reel_part or not tops:
             continue
-        next_break = next((b for b in breaks if b["qty"] > qty), None)
+        top = min(tops, key=lambda o: (not o["in_stock"], o["extended_price"]))
+        total = round(reel_part["extended_price"] + top["extended_price"], 4)
         options.append(
             {
-                "digikey_pn": v["digikey_pn"],
-                "packaging": v["packaging"],
-                "unit_price": unit,
-                "extended_price": round(unit * qty, 4),
-                "stock": v["stock"],
-                "in_stock": v["stock"] is not None and v["stock"] >= qty,
-                "next_break": next_break,
+                "digikey_pn": f"{reel_part['digikey_pn']} + {top['digikey_pn']}",
+                "packaging": f"{full // size} x {reel['packaging']} + {rest} on {top['packaging']}",
+                "quantity": qty,
+                "unit_price": round(total / qty, 5),
+                "extended_price": total,
+                "stock": min(reel_part["stock"] or 0, top["stock"] or 0),
+                "in_stock": reel_part["in_stock"] and top["in_stock"],
+                "next_break": None,
+                "lines": [
+                    {k: o[k] for k in ("digikey_pn", "packaging", "quantity", "unit_price", "extended_price")}
+                    for o in (reel_part, top)
+                ],
             }
         )
     options.sort(key=lambda o: (not o["in_stock"], o["extended_price"]))
