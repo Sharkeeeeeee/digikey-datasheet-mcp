@@ -111,8 +111,11 @@ class DigiKeyClient:
                     "(or set DIGIKEY_SANDBOX=true for a Sandbox app).",
                     response.status_code,
                 )
-            body = response.json()
-            self._token = body["access_token"]
+            try:
+                body = response.json()
+                self._token = str(body["access_token"])
+            except (ValueError, KeyError, TypeError) as exc:
+                raise DigiKeyError("DigiKey returned an unexpected token response.") from exc
             # Refresh a minute early so a token never expires mid-request.
             self._token_expiry = time.monotonic() + max(int(body.get("expires_in", 600)) - 60, 30)
             return self._token
@@ -156,7 +159,13 @@ class DigiKeyClient:
             raise DigiKeyError(f"DigiKey API error HTTP {status}: {_problem_message(response)}", status)
         if not response.content:
             return {}
-        return response.json()
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise DigiKeyError(f"DigiKey returned a response that is not JSON (HTTP {status}).", status) from exc
+        if not isinstance(body, dict):
+            raise DigiKeyError("DigiKey returned an unexpected response shape.", status)
+        return body
 
     async def keyword_search(
         self,

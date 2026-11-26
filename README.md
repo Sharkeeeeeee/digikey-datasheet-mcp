@@ -29,30 +29,30 @@ Claude:  → search_parts("LDO 3.3V 500mA SOT-23-5", in_stock=true, sort="price"
 
 ## Why this one
 
-- **Reads datasheets, not just links to them.** Finds the pinout, absolute maximum ratings, recommended operating conditions, electrical characteristics, thermal, package and ordering sections (from PDF bookmarks, or headings when there are none) and hands the model just those pages, plus a best-effort pin table. Works on any PDF URL, not only DigiKey's.
-- **Real buying answers.** `get_price` picks the cheapest packaging that covers your quantity (cut tape vs. full reel, skipping Digi-Reel fees) and shows the next price break. `price_bom` costs a whole BOM for N boards and flags missing, out-of-stock and obsolete parts.
+- **Reads datasheets, not just links to them.** Finds the pinout, absolute maximum ratings, recommended operating conditions, electrical characteristics, thermal, package and ordering sections (from PDF bookmarks, or headings when there are none) and hands the model just those pages, plus a best-effort pin table. Works on any PDF URL or a PDF on your disk, not only DigiKey's.
+- **Real buying answers.** `get_price` finds the cheapest way to buy your quantity, including whole reels topped up with cut tape (3,500 pcs = one 3,000 reel + 500 cut tape), and shows the next price break. `price_bom` takes a pasted KiCad/Altium/Excel BOM, merges duplicate rows, adds attrition spares, costs it for N boards, flags missing, out-of-stock and obsolete parts, and can suggest in-stock substitutes.
 - **Compare and replace.** Side-by-side parameter tables, and DigiKey's own substitutes for parts that went obsolete.
 - **Works without keys too.** `search_lcsc` (LCSC / JLCPCB assembly parts) and the datasheet tools on a URL need no account. Add DigiKey keys when you want the rest.
-- **Your keys stay yours.** Runs locally over stdio. Credentials go to `api.digikey.com` and nowhere else. Every tool is read-only: no carts, no orders.
-- **Tested.** 58 tests against a mocked DigiKey API and generated PDFs, on Linux, macOS and Windows, Python 3.10 to 3.13.
+- **Your keys stay yours.** Runs locally over stdio. Credentials go to `api.digikey.com` and nowhere else. Every tool is read-only: no carts, no orders. Datasheet downloads refuse localhost and private-network addresses, so a URL planted in a document can't probe your network.
+- **Tested.** 97 tests against a mocked DigiKey API and generated PDFs, on Linux, macOS and Windows, Python 3.10 to 3.13.
 
 ## Tools
 
 | Tool | What it does | Needs DigiKey keys |
 | --- | --- | :---: |
-| `search_parts` | Keyword / part-number search with in-stock, RoHS, sort and manufacturer filters | ✓ |
+| `search_parts` | Keyword / part-number search; filters for stock, minimum stock, max price, RoHS, active-only, manufacturer; sort by price or stock | ✓ |
 | `get_part` | Every parameter, packaging options and price breaks, lifecycle, RoHS, lead time | ✓ |
-| `get_price` | Best price for a quantity, across packaging types, with the next price break | ✓ |
+| `get_price` | Best price for a quantity across packaging types (incl. reel + cut tape), with the next price break | ✓ |
 | `find_alternatives` | DigiKey substitutes (direct, similar, upgrade) with stock and price | ✓ |
 | `compare_parts` | Markdown comparison table of 2 to 6 parts, highlighting what differs | ✓ |
-| `price_bom` | Cost a BOM (up to 100 lines) for N boards, with warnings | ✓ |
+| `price_bom` | Cost a BOM (items or pasted CSV, up to 100 distinct parts) for N boards with spares, warnings and optional substitutes | ✓ |
 | `search_lcsc` | LCSC / JLCPCB parts: LCSC code, stock, price, basic/preferred status | |
 | `datasheet_outline` | Page count, bookmarks and where each key section starts | for part numbers |
 | `datasheet_section` | Text of one section (pinout, absolute_maximum_ratings, electrical_characteristics, ...) | for part numbers |
 | `datasheet_search` | Find a term (e.g. "I2C address", "quiescent current") with page numbers | for part numbers |
 | `datasheet_pages` | Raw text of a page range | for part numbers |
 
-The datasheet tools take either a part number (looked up on DigiKey) or a datasheet URL (no keys needed).
+The datasheet tools take a part number (looked up on DigiKey), a datasheet URL, or a local PDF path such as `C:\datasheets\lm358.pdf` (no keys needed for the last two).
 
 ## Install
 
@@ -123,6 +123,7 @@ DigiKey's default quota for a new app is around 1,000 requests per day, plenty f
 | `DIGIKEY_SANDBOX` | `false` | `true` to use a Sandbox app |
 | `DIGIKEY_MCP_CACHE_DIR` | `~/.cache/digikey-datasheet-mcp` | Where extracted datasheet text is cached |
 | `DATASHEET_MAX_MB` | `50` | Largest PDF to download |
+| `DATASHEET_ALLOW_PRIVATE` | `false` | `true` to allow datasheet URLs on localhost / your intranet |
 | `LCSC_SEARCH_URL` | `https://jlcsearch.tscircuit.com` | LCSC index; point at a self-hosted [jlcsearch](https://github.com/tscircuit/jlcsearch) if you like |
 
 ## How datasheet reading works
@@ -135,7 +136,8 @@ Limits worth knowing: scanned (image-only) PDFs have no text and are reported as
 
 ## Example prompts
 
-- "Cost this BOM for 50 boards and tell me what's out of stock:" followed by a pasted BOM
+- "Cost this BOM for 50 boards with 5% spares, and suggest replacements for anything out of stock:" followed by a pasted CSV BOM
+- "Read ~/Downloads/ADS1115.pdf and give me the I2C address options."
 - "Compare TPS7A2033PDBVR, AP2112K-3.3TRG1 and MCP1700T-3302E/TT for a battery-powered sensor."
 - "LM1117 is obsolete in my design. What are drop-in replacements in stock?"
 - "From the STM32F103C8 datasheet, list the 5 V tolerant pins."

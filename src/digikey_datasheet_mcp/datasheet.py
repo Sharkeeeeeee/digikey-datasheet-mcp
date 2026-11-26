@@ -7,15 +7,19 @@ PDF's bookmarks when it has them, and from heading-like lines otherwise.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import io
+import ipaddress
 import json
 import re
+import socket
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from pypdf import PdfReader
@@ -77,6 +81,59 @@ def normalize_url(url: str) -> str:
 def looks_like_url(text: str) -> bool:
     text = text.strip()
     return text.startswith(("http://", "https://", "//"))
+
+
+def local_pdf_path(text: str) -> Path | None:
+    """A local PDF given as a path or file:// URL, else None."""
+    text = text.strip().strip('"')
+    if text.lower().startswith("file://"):
+        parsed = urlparse(text)
+        raw = unquote(parsed.path)
+        # file:///C:/x.pdf -> C:/x.pdf on Windows
+        if re.match(r"^/[A-Za-z]:/", raw):
+            raw = raw[1:]
+        text = raw
+    if not text.lower().endswith(".pdf"):
+        return None
+    # Absolute (POSIX or Windows drive / UNC), home-relative or explicitly relative paths only,
+    # so a part number that happens to end in ".pdf" is never mistaken for a file.
+    if not re.match(r"^(?:[A-Za-z]:[\\/]|[\\/]|~|\.{1,2}[\\/])", text):
+        return None
+    return Path(text).expanduser()
+
+
+def _is_private_address(host: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(host.strip("[]").split("%")[0])
+    except ValueError:
+        return False
+    return not ip.is_global
+
+
+async def check_public_url(url: str) -> None:
+    """Refuse URLs pointing at this machine or the local network (SSRF guard).
+
+    A datasheet URL can come from text the model read, so it must not be able to reach
+    127.0.0.1, router admin pages or cloud metadata endpoints.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        raise DatasheetError(f"Not an http(s) URL: {url!r}")
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")) or _is_private_address(host):
+        raise DatasheetError(
+            f"Refusing to fetch {host}: it is a local or private address. "
+            "Set DATASHEET_ALLOW_PRIVATE=true to allow intranet datasheet servers."
+        )
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return  # let the HTTP client report the DNS failure
+    for info in infos:
+        if _is_private_address(str(info[4][0])):
+            raise DatasheetError(
+                f"Refusing to fetch {host}: it resolves to a private address. "
+                "Set DATASHEET_ALLOW_PRIVATE=true to allow intranet datasheet servers."
+            )
 
 
 def _find_pdf_link(html: str, base: str) -> str | None:
@@ -264,21 +321,26 @@ def search(doc: Document, query: str, max_hits: int = 12, context: int = 220) ->
     return hits
 
 
+CACHE_VERSION = 2
+MEMORY_DOCS = 12
+MAX_REDIRECTS = 8
+
+
 class DatasheetStore:
-    """Fetches PDFs and caches extracted text on disk, keyed by URL."""
+    """Fetches PDFs (or reads local ones) and caches extracted text, keyed by URL."""
 
     def __init__(self, settings: Settings, http: httpx.AsyncClient | None = None) -> None:
         self.settings = settings
         self._http = http or httpx.AsyncClient(
             timeout=max(settings.timeout, 60),
-            follow_redirects=True,
             headers={
                 # Several manufacturer sites refuse requests without a browser-like agent.
                 "User-Agent": "Mozilla/5.0 (compatible; digikey-datasheet-mcp; +https://github.com/Sharkeeeeeee/digikey-datasheet-mcp)",
                 "Accept": "application/pdf,text/html;q=0.8,*/*;q=0.5",
             },
         )
-        self._memory: dict[str, Document] = {}
+        self._memory: OrderedDict[str, Document] = OrderedDict()
+        self._locks: dict[str, asyncio.Lock] = {}
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -291,37 +353,67 @@ class DatasheetStore:
         path = self._cache_path(url)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("version") != CACHE_VERSION or data.get("url") != url:
+                return None
             return Document(url=url, pages=data["pages"], title=data.get("title"), bookmarks=data.get("bookmarks", []))
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, AttributeError):
             return None
 
     def _save_cached(self, doc: Document) -> None:
         path = self._cache_path(doc.url)
+        payload = {
+            "version": CACHE_VERSION,
+            "url": doc.url,
+            "title": doc.title,
+            "pages": doc.pages,
+            "bookmarks": doc.bookmarks,
+        }
+        tmp = path.with_suffix(".tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {"url": doc.url, "title": doc.title, "pages": doc.pages, "bookmarks": doc.bookmarks}
-            path.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(path)  # atomic, so a crash never leaves a half-written cache file
         except OSError:
             pass  # caching is an optimisation only
 
-    async def _download(self, url: str) -> bytes:
+    def _remember(self, key: str, doc: Document) -> Document:
+        self._memory[key] = doc
+        self._memory.move_to_end(key)
+        while len(self._memory) > MEMORY_DOCS:
+            self._memory.popitem(last=False)
+        return doc
+
+    async def _fetch(self, url: str) -> tuple[bytes, str]:
+        """GET with manual redirects so every hop passes the private-address check."""
         limit = self.settings.max_pdf_mb * 1024 * 1024
-        for _ in range(2):  # the URL itself, then at most one PDF link found in an HTML page
+        for _ in range(MAX_REDIRECTS + 1):
+            if not self.settings.allow_private_urls:
+                await check_public_url(url)
             try:
-                async with self._http.stream("GET", url) as response:
+                async with self._http.stream("GET", url, follow_redirects=False) as response:
+                    if response.is_redirect and response.headers.get("location"):
+                        url = normalize_url(urljoin(url, response.headers["location"]))
+                        continue
                     if response.status_code >= 400:
                         raise DatasheetError(f"Datasheet download failed: HTTP {response.status_code} for {url}")
+                    declared = response.headers.get("content-length", "")
+                    if declared.isdigit() and int(declared) > limit:
+                        raise DatasheetError(f"Datasheet is larger than {self.settings.max_pdf_mb} MB.")
                     chunks, size = [], 0
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
                         if size > limit:
                             raise DatasheetError(f"Datasheet is larger than {self.settings.max_pdf_mb} MB.")
                         chunks.append(chunk)
-                    final_url = str(response.url)
+                    return b"".join(chunks), url
             except httpx.HTTPError as exc:
                 raise DatasheetError(f"Could not download the datasheet: {exc}") from exc
-            data = b"".join(chunks)
-            if data.lstrip()[:5] == b"%PDF-":
+        raise DatasheetError("Too many redirects while downloading the datasheet.")
+
+    async def _download(self, url: str) -> bytes:
+        for _ in range(2):  # the URL itself, then at most one PDF link found in an HTML page
+            data, final_url = await self._fetch(url)
+            if b"%PDF-" in data[:1024]:
                 return data
             link = _find_pdf_link(data[:500_000].decode("utf-8", "replace"), final_url)
             if not link:
@@ -329,20 +421,53 @@ class DatasheetStore:
             url = normalize_url(link)
         raise DatasheetError(
             "The URL did not return a PDF (probably a landing page or a bot check). "
-            "Open it in a browser and pass the direct PDF link instead."
+            "Open it in a browser and pass the direct PDF link instead, or download it and pass the file path."
         )
 
-    async def get(self, url: str) -> Document:
-        url = normalize_url(url)
+    @staticmethod
+    def _check_text(doc: Document) -> Document:
+        if not any(p.strip() for p in doc.pages):
+            raise DatasheetError(
+                "The PDF has no extractable text (it is probably scanned images). OCR is not supported."
+            )
+        return doc
+
+    async def _get_local(self, path: Path) -> Document:
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            raise DatasheetError(f"Cannot open {path}: {exc.strerror or exc}") from exc
+        key = f"file://{path.resolve()}?{stat.st_mtime_ns}-{stat.st_size}"
+        if key in self._memory:
+            self._memory.move_to_end(key)
+            return self._memory[key]
+        if stat.st_size > self.settings.max_pdf_mb * 1024 * 1024:
+            raise DatasheetError(f"Datasheet is larger than {self.settings.max_pdf_mb} MB.")
+        data = await asyncio.to_thread(path.read_bytes)
+        if b"%PDF-" not in data[:1024]:
+            raise DatasheetError(f"{path} is not a PDF file.")
+        doc = await asyncio.to_thread(parse_pdf, data, str(path))
+        return self._remember(key, self._check_text(doc))
+
+    async def get(self, source: str) -> Document:
+        """Open a datasheet from an http(s) URL, a file:// URL or a local .pdf path."""
+        local = local_pdf_path(source)
+        if local is not None:
+            return await self._get_local(local)
+        url = normalize_url(source)
         if url in self._memory:
+            self._memory.move_to_end(url)
             return self._memory[url]
-        doc = self._load_cached(url)
-        if doc is None:
-            doc = parse_pdf(await self._download(url), url)
-            if not any(p.strip() for p in doc.pages):
-                raise DatasheetError(
-                    "The PDF has no extractable text (it is probably scanned images). OCR is not supported."
-                )
-            self._save_cached(doc)
-        self._memory[url] = doc
+        # One download per URL even when several tool calls ask for it at once.
+        lock = self._locks.setdefault(url, asyncio.Lock())
+        async with lock:
+            if url in self._memory:
+                return self._memory[url]
+            doc = self._load_cached(url)
+            if doc is None:
+                data = await self._download(url)
+                doc = self._check_text(await asyncio.to_thread(parse_pdf, data, url))
+                self._save_cached(doc)
+            self._remember(url, doc)
+        self._locks.pop(url, None)
         return doc

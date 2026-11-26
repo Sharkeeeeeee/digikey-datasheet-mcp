@@ -136,3 +136,97 @@ def test_section_stops_at_next_heading_on_same_page(doc):
     assert result["pages"] == [4]
     assert "Junction temperature" in result["text"]
     assert "Recommended" not in result["text"]
+
+
+async def test_store_reads_local_pdf(store, backend, tmp_path):
+    path = tmp_path / "ldo.pdf"
+    path.write_bytes(make_pdf(LDO_PAGES))
+    doc = await store.get(str(path))
+    assert doc.page_count == 6
+    assert (await store.get(path.as_uri())).pages == doc.pages
+    assert backend.requests == []
+
+
+async def test_store_local_errors(store, tmp_path):
+    with pytest.raises(DatasheetError, match="Cannot open"):
+        await store.get(str(tmp_path / "missing.pdf"))
+    fake = tmp_path / "fake.pdf"
+    fake.write_text("hello")
+    with pytest.raises(DatasheetError, match="not a PDF"):
+        await store.get(str(fake))
+
+
+def test_local_pdf_path():
+    assert ds.local_pdf_path("https://x.com/a.pdf") is None
+    assert ds.local_pdf_path("TPS7A9933DBVR") is None
+    assert ds.local_pdf_path("/data/a.pdf") is not None
+    assert str(ds.local_pdf_path("file:///C:/ds/a%20b.pdf")).replace("\\", "/") == "C:/ds/a b.pdf"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost/a.pdf",
+        "http://127.0.0.1:8080/a.pdf",
+        "http://10.0.0.5/a.pdf",
+        "http://169.254.169.254/latest/meta-data",
+        "http://[::1]/a.pdf",
+        "http://printer.local/a.pdf",
+    ],
+)
+async def test_store_refuses_private_addresses(store, backend, url):
+    with pytest.raises(DatasheetError, match="private"):
+        await store.get(url)
+    assert backend.requests == []
+
+
+async def test_store_checks_every_redirect_hop(store, backend):
+    import httpx
+
+    backend.overrides["/go"] = lambda r: httpx.Response(302, headers={"location": "http://127.0.0.1/secret.pdf"})
+    with pytest.raises(DatasheetError, match="private"):
+        await store.get("https://www.example-semi.com/go")
+    assert [str(r.url) for r in backend.requests] == ["https://www.example-semi.com/go"]
+
+
+async def test_store_follows_public_redirect(store, backend):
+    import httpx
+
+    backend.overrides["/go"] = lambda r: httpx.Response(301, headers={"location": "/lit/ds/tps7a99.pdf"})
+    backend.add_file(DATASHEET_URL, make_pdf(LDO_PAGES))
+    doc = await store.get("https://www.example-semi.com/go")
+    assert doc.page_count == 6
+
+
+async def test_private_urls_allowed_when_configured(tmp_path, backend):
+    from conftest import http_for
+    from fixtures import settings
+
+    store = DatasheetStore(settings(tmp_path, allow_private_urls=True), http=http_for(backend))
+    backend.add_file("http://10.0.0.5/a.pdf", make_pdf(LDO_PAGES))
+    assert (await store.get("http://10.0.0.5/a.pdf")).page_count == 6
+
+
+async def test_concurrent_requests_download_once(store, backend):
+    import asyncio
+
+    backend.add_file(DATASHEET_URL, make_pdf(LDO_PAGES))
+    docs = await asyncio.gather(*(store.get(DATASHEET_URL) for _ in range(5)))
+    assert all(d is docs[0] for d in docs)
+    assert len(backend.requests) == 1
+
+
+async def test_stale_cache_version_is_ignored(store, backend, cfg):
+    import json
+
+    backend.add_file(DATASHEET_URL, make_pdf(LDO_PAGES))
+    path = store._cache_path(DATASHEET_URL)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"url": DATASHEET_URL, "pages": ["old"]}))
+    doc = await store.get(DATASHEET_URL)
+    assert doc.page_count == 6
+
+
+async def test_pdf_with_leading_junk_is_accepted(store, backend):
+    backend.add_file(DATASHEET_URL, b"\r\n\x00junk" + make_pdf(LDO_PAGES))
+    assert (await store.get(DATASHEET_URL)).page_count == 6
